@@ -11,7 +11,19 @@ const LIST_ORDER = ['Clothing & footwear', 'Workouts', 'Activity gear', 'Food & 
 const SOURCE_LABEL = { forecast: 'Live forecast', typical: 'Typical for these dates', estimate: 'Estimate' };
 const TIER_LABEL = { personal: 'Keep with you', carry: 'Carry-on', checked: 'Checked' };
 const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-const HOME_COUNTRY = (navigator.language.split('-')[1] || 'US').toUpperCase();
+const BROWSER_COUNTRY = (navigator.language.split('-')[1] || 'US').toUpperCase();
+
+/* Prototype accounts: kept in this browser's localStorage. Passwords are never stored. */
+const ACCT = 'packwise-account', SESS = 'packwise-session';
+const local = {
+  get(k) { try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* storage unavailable */ } },
+  del(k) { try { localStorage.removeItem(k); } catch { /* storage unavailable */ } },
+};
+const account = () => { const a = local.get(ACCT); return a && local.get(SESS) === a.email ? a : null; };
+const homeCountry = () => account()?.home || BROWSER_COUNTRY;
+const regionName = new Intl.DisplayNames(['en'], { type: 'region' });
+const COUNTRIES = [...new Set([...Object.keys(PLUGS), BROWSER_COUNTRY])].map(c => [c, regionName.of(c)]).sort((a, b) => a[1].localeCompare(b[1]));
 const STORE = 'packwise-v6';
 
 let uid = 0;
@@ -40,6 +52,9 @@ const blankState = () => ({
   openBags: {},
   showWhy: false,
   importPreview: null,
+  sample: false,
+  authMode: 'signup',
+  authReason: '',
 });
 
 let state = load() || blankState();
@@ -194,8 +209,9 @@ function adapterNeeds() {
   const seen = new Map();
   state.legs.forEach((l, i) => {
     const w = state.wx[wxKey(l, i)];
-    if (!w?.cc || w.cc === HOME_COUNTRY || seen.has(w.cc)) return;
-    if (PLUGS[w.cc] && PLUGS[w.cc] === PLUGS[HOME_COUNTRY]) return;
+    const home = homeCountry();
+    if (!w?.cc || w.cc === home || seen.has(w.cc)) return;
+    if (PLUGS[w.cc] && PLUGS[w.cc] === PLUGS[home]) return;
     seen.set(w.cc, PLUGS[w.cc] ? `${w.country} uses type ${PLUGS[w.cc]} plugs` : `Check the plug type for ${w.country}`);
   });
   return [...seen.values()];
@@ -426,8 +442,11 @@ function shell(cur, body, actions) {
   <div class="shell">
     <header class="app-top">
       <button class="logo" data-act="home" aria-label="PackWise home">${logo(false)}</button>
-      <button class="link" data-act="restart" id="restart">Start over</button>
+      <div class="top-links">${account()
+        ? `<button class="link" data-act="restart" id="restart">Start over</button><button class="link" data-act="logout" id="logout">Log out</button>`
+        : `<button class="link" data-act="auth:login" id="top-login">Log in</button>`}</div>
     </header>
+    ${state.sample && !account() ? `<div class="sample-bar" role="note"><p><strong>You’re viewing a sample plan.</strong> Create an account to plan your own trip.</p><button class="btn" data-act="auth:signup" id="sample-signup">Create account</button></div>` : ''}
     ${stepsBar(cur)}
     <main id="main" tabindex="-1">${body}</main>
   </div>
@@ -531,7 +550,10 @@ function homeScreen() {
     </svg>
     <div class="topbar">
       <span class="logo">${logo(true)}</span>
-      <button class="btn btn-ghost-light" style="min-height:42px;padding:0 18px" data-act="sample">Sample plan</button>
+      <div class="top-links light">
+        ${account() ? `<span class="hello">Hi, ${esc(account().name)}</span><button class="link" data-act="logout">Log out</button>` : `<button class="link" data-act="auth:login">Log in</button>`}
+        <button class="btn btn-ghost-light" style="min-height:42px;padding:0 18px" data-act="sample">Sample plan</button>
+      </div>
     </div>
     <div class="hero-body">
       <h1>Your adventure, perfectly packed.</h1>
@@ -657,7 +679,7 @@ function setupScreen() {
   const bagCap = BAGS.reduce((s, b) => s + (state.bags[b.id] || 0) * b.cap, 0);
 
   const body = `
-    <div class="screen-head"><h1>Where are you headed?</h1><p>Add each activity in the order you’ll do it. Every stop gets its own weather.</p></div>
+    <div class="screen-head"><h1>Where are you headed${account() ? `, ${esc(account().name)}` : ''}?</h1><p>Add each activity in the order you’ll do it. Every stop gets its own weather.</p></div>
 
     <div class="setup-grid"><div class="col-main">
     <div class="group">${importBox()}</div>
@@ -927,10 +949,109 @@ function packScreen() {
     `<button class="btn btn-ghost" data-act="go:plan">Back</button><button class="btn" data-act="finish" id="finish">${state.finished ? 'Packed' : 'Finish packing'}</button>`);
 }
 
+function accountScreen() {
+  const signup = state.authMode === 'signup';
+  const field = (id, label, input, hint = '') => `
+    <div class="group auth-field" data-field="${id}">
+      <label for="a-${id}">${label}</label>${input}${hint ? `<p class="hint">${hint}</p>` : ''}
+    </div>`;
+  const pw = `<div class="pw"><input class="field" id="a-password" name="password" type="password" autocomplete="${signup ? 'new-password' : 'current-password'}" ${signup ? 'minlength="8"' : ''}>
+    <button type="button" class="link" data-act="pw-toggle" id="pw-toggle" aria-controls="a-password">Show</button></div>`;
+  const home = homeCountry();
+  return `
+  <div class="auth">
+    <aside class="auth-side" aria-hidden="true">
+      <svg class="hero-map" viewBox="0 0 1200 800" preserveAspectRatio="xMidYMid slice"><g class="contours">${contours()}</g></svg>
+      <div class="auth-side-in">
+        <span class="logo">${logo(true)}</span>
+        <div>
+          <p class="auth-pitch">Pack for every stop, not just the first one.</p>
+          <ul class="auth-list">
+            <li>${icon('therm')}Weather for every stop</li>
+            <li>${icon('top')}Counts for every garment</li>
+            <li>${icon('roller')}A plan for each bag</li>
+          </ul>
+        </div>
+      </div>
+    </aside>
+    <main id="main" class="auth-main" tabindex="-1">
+      <div class="auth-box">
+        <button class="logo auth-logo" data-act="home" aria-label="PackWise home">${logo(false)}</button>
+        <h1>${signup ? 'Create your account' : 'Welcome back'}</h1>
+        <p class="auth-lede">${esc(state.authReason || (signup ? 'It takes a minute. Then you can plan your first trip.' : 'Log in to keep planning.'))}</p>
+        <div class="seg two" role="group" aria-label="Account">
+          <button data-act="auth-mode:signup" aria-pressed="${signup}" id="mode-signup"><strong>Create account</strong></button>
+          <button data-act="auth-mode:login" aria-pressed="${!signup}" id="mode-login"><strong>Log in</strong></button>
+        </div>
+        <form id="auth-form" novalidate>
+          ${signup ? field('name', 'First name', `<input class="field" id="a-name" name="name" autocomplete="given-name">`) : ''}
+          ${field('email', 'Email', `<input class="field" id="a-email" name="email" type="email" autocomplete="email" value="${signup ? '' : esc(local.get(ACCT)?.email || '')}">`)}
+          ${field('password', 'Password', pw, signup ? 'At least 8 characters.' : '')}
+          ${signup ? field('home', 'Where do you usually travel from?', `<select class="field" id="a-home" name="home">${COUNTRIES.map(([c, n]) => `<option value="${c}" ${c === home ? 'selected' : ''}>${esc(n)}</option>`).join('')}</select>`, 'So we can tell you when you need a travel adapter.') : ''}
+          <button class="btn btn-block" type="submit" id="auth-submit">${signup ? 'Create account' : 'Log in'}</button>
+        </form>
+        <p class="auth-alt">Just looking? <button class="link" data-act="sample" id="auth-sample">See a sample plan</button></p>
+        <p class="auth-note">Prototype: your account is saved only in this browser, and passwords aren’t stored.</p>
+      </div>
+    </main>
+  </div>`;
+}
+
+function openAuth(mode, reason = '') {
+  state.authMode = mode;
+  state.authReason = reason;
+  state.screen = 'account';
+  render({ newScreen: true });
+}
+
+function afterAuth(acct, welcome) {
+  local.set(SESS, acct.email);
+  if (state.sample || state.reached === 0) { state = blankState(); }
+  go('setup');
+  toast(welcome);
+}
+
+function submitAuth(form) {
+  const data = Object.fromEntries(new FormData(form));
+  const signup = state.authMode === 'signup';
+  const errs = {};
+  const email = (data.email || '').trim().toLowerCase();
+  if (signup && !(data.name || '').trim()) errs.name = 'Add your first name.';
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) errs.email = 'Enter an email like name@example.com.';
+  if (signup && (data.password || '').length < 8) errs.password = 'Use at least 8 characters.';
+  if (!signup && !data.password) errs.password = 'Enter your password.';
+  const existing = local.get(ACCT);
+  if (!errs.email && signup && existing?.email === email) errs.email = 'There’s already an account with this email. Log in instead.';
+  if (!errs.email && !signup && existing?.email !== email) errs.email = 'No account with this email on this browser. Create one instead.';
+
+  form.querySelectorAll('.err').forEach(e => e.remove());
+  form.querySelectorAll('.invalid').forEach(e => { e.classList.remove('invalid'); e.removeAttribute('aria-invalid'); });
+  const keys = Object.keys(errs);
+  if (keys.length) {
+    keys.forEach(k => {
+      const box = form.querySelector(`[data-field="${k}"]`);
+      const input = box.querySelector('input, select');
+      input.classList.add('invalid');
+      input.setAttribute('aria-invalid', 'true');
+      input.setAttribute('aria-describedby', `aerr-${k}`);
+      box.insertAdjacentHTML('beforeend', `<p class="err" id="aerr-${k}">${esc(errs[k])}</p>`);
+    });
+    form.querySelector('.invalid').focus();
+    return;
+  }
+  if (signup) {
+    const acct = { name: data.name.trim(), email, home: data.home, created: todayIso() };
+    local.set(ACCT, acct);
+    afterAuth(acct, `Welcome to PackWise, ${acct.name}`);
+  } else {
+    afterAuth(existing, `Welcome back, ${existing.name}`);
+  }
+}
+
 /* ---------- Render ---------- */
 function render(opts = {}) {
   const focusId = document.activeElement?.id;
-  const screens = { home: homeScreen, setup: setupScreen, plan: planScreen, pack: packScreen };
+  const screens = { home: homeScreen, account: accountScreen, setup: setupScreen, plan: planScreen, pack: packScreen };
   root.innerHTML = (screens[state.screen] || homeScreen)();
   save();
   if (opts.newScreen) {
@@ -1005,7 +1126,7 @@ function loadSample() {
   const hike = { ...newLeg(), activity: 'hiking', destination: 'Yosemite National Park', days: 3 };
   Object.assign(state, {
     start: isoDate(d), legs: [concert, hike], bags: { backpack: 1, medium: 1 },
-    workout: { days: 2, kind: 'running' }, lodging: ['hotel'], laundry: 'no', shopping: 'some',
+    workout: { days: 2, kind: 'running' }, lodging: ['hotel'], laundry: 'no', shopping: 'some', sample: true,
   });
 }
 
@@ -1021,12 +1142,31 @@ root.addEventListener('click', e => {
 
   switch (cmd) {
     case 'home': state.screen = 'home'; render({ newScreen: true }); break;
-    case 'start': go('setup'); break;
+    case 'start':
+      if (!account()) { openAuth('signup', 'Create an account to start planning your trip.'); break; }
+      if (state.sample) state = blankState();
+      go('setup'); break;
+    case 'auth': openAuth(arg); break;
+    case 'auth-mode': state.authMode = arg; state.authReason = ''; render(); break;
+    case 'logout':
+      local.del(SESS);
+      state = blankState();
+      render({ newScreen: true });
+      toast('Logged out');
+      break;
+    case 'pw-toggle': {
+      const input = document.getElementById('a-password');
+      const show = input.type === 'password';
+      input.type = show ? 'text' : 'password';
+      btn.textContent = show ? 'Hide' : 'Show';
+      break;
+    }
     case 'sample': loadSample(); generate(); break;
     case 'restart':
       if (state.reached > 0 && !state.finished && !confirm('Start over? Your trip details will be cleared.')) return;
       state = blankState(); render({ newScreen: true }); break;
     case 'go':
+      if (arg === 'setup' && !account()) { openAuth('signup', 'Create an account to plan your own trip.'); break; }
       if (arg === 'plan' && state.screen === 'setup') { generate(); break; }
       go(arg); break;
     case 'leg-act': {
@@ -1160,6 +1300,12 @@ root.addEventListener('change', e => {
   } else if (el.id === 'f-itin' && el.files.length) {
     importFile(el.files[0]);
   }
+});
+
+root.addEventListener('submit', e => {
+  if (e.target.id !== 'auth-form') return;
+  e.preventDefault();
+  submitAuth(e.target);
 });
 
 root.addEventListener('keydown', e => {
